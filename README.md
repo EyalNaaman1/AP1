@@ -1,1 +1,3 @@
-# AP1
+Agentic Programming - week 1
+
+This project is a fast-paced 2D top-down survival shooter developed as a strict one-hour rapid prototyping challenge. Built entirely in a single HTML file using vanilla JavaScript and HTML5 Canvas, the goal was to create a fully playable and visually satisfying experience in minimal time. Players must survive endless waves of incoming enemies by moving with the WASD keys and aiming with the mouse. Despite the tight one-hour time limit, the game emphasizes a polished "game feel" through a vibrant neon aesthetic, smooth mechanics, and dynamic particle explosions, proving that engaging and addictive gameplay can be achieved without complex engines or long development cycles.
