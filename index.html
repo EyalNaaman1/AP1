@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Neon Survivor</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+function resize() { cv.width = innerWidth; cv.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+const keys = {}, mouse = { x: 0, y: 0, down: false };
+// e.code works on any keyboard layout (e.key broke WASD on non-Latin layouts)
+const KMAP = { KeyW: 'w', KeyA: 'a', KeyS: 's', KeyD: 'd', ArrowUp: 'w', ArrowLeft: 'a', ArrowDown: 's', ArrowRight: 'd' };
+addEventListener('keydown', e => { if (KMAP[e.code]) { keys[KMAP[e.code]] = true; e.preventDefault(); } });
+addEventListener('keyup', e => { if (KMAP[e.code]) keys[KMAP[e.code]] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+addEventListener('contextmenu', e => e.preventDefault());
+
+// sound: tiny WebAudio synth, no files
+let ac;
+function beep(f, d, type = 'square', vol = 0.1, slide = 0.5) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+  o.type = type; o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f * slide), t + d);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + d);
+  o.connect(g); g.connect(ac.destination); o.start(t); o.stop(t + d);
+}
+addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+addEventListener('mouseup', () => mouse.down = false);
+addEventListener('mousedown', () => {
+  ac = ac || new AudioContext(); ac.resume();
+  mouse.down = true;
+  if (over) reset();
+});
+
+const MAX_HP = 5;
+// weapon level -> bullet angle offsets (radians)
+const SPREAD = [[0], [-0.07, 0.07], [-0.2, 0, 0.2], [-0.3, -0.15, 0, 0.15, 0.3]];
+const POW = {
+  heart:  { c: '#ff3366', l: '+', txt: 'EXTRA LIFE' },
+  weapon: { c: '#ffee00', l: 'W', txt: 'WEAPON UPGRADE' },
+  rapid:  { c: '#33ff99', l: 'R', txt: 'RAPID FIRE' },
+  shield: { c: '#00ddff', l: 'S', txt: 'SHIELD' },
+  nuke:   { c: '#ff9900', l: 'N', txt: 'NUKE!' },
+};
+
+let shake = 0, hue = 0, player, bullets, enemies, particles, powerups, texts,
+    score, wave, toSpawn, breakT, weapon, rapidT, shieldT, over, spawnT, shootT, hitT, last;
+
+function reset() {
+  player = { x: cv.width / 2, y: cv.height / 2, vx: 0, vy: 0, r: 14, hp: 3 };
+  bullets = []; enemies = []; particles = []; powerups = []; texts = [];
+  score = 0; wave = 0; toSpawn = 0; breakT = 2; weapon = 0; rapidT = 0; shieldT = 0;
+  over = false; spawnT = 0; shootT = 0; hitT = 0;
+}
+
+function spawnEnemy() {
+  const m = 40, side = Math.floor(Math.random() * 4);
+  const x = side < 2 ? Math.random() * cv.width : (side === 2 ? -m : cv.width + m);
+  const y = side >= 2 ? Math.random() * cv.height : (side === 0 ? -m : cv.height + m);
+  const base = Math.min(240, 70 + wave * 7 + Math.random() * 40), t = Math.random();
+  let e = { x, y, r: 12 + Math.random() * 8, spd: base, hp: 1, flash: 0,
+            color: ['#ff3355', '#ff9900', '#cc44ff', '#33ff99'][Math.floor(Math.random() * 4)] };
+  if (wave >= 3 && t < 0.25) { e.r = 9; e.spd *= 1.7; e.color = '#ffee00'; }                          // runner
+  else if (wave >= 5 && t < 0.45) { e.r = 28; e.spd *= 0.55; e.hp = 3 + Math.floor(wave / 5); e.color = '#ff00aa'; } // tank
+  enemies.push(e);
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 50 + Math.random() * 250;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5 + Math.random() * 0.4, max: 0.9, color });
+  }
+}
+
+function say(x, y, s, color) { texts.push({ x, y, s, color, life: 1.2 }); }
+
+function dropPower(x, y) {
+  const k = Object.keys(POW)[Math.floor(Math.random() * 5)];
+  powerups.push({ x, y, k, life: 12 });
+}
+
+function collect(p) {
+  const d = POW[p.k];
+  say(p.x, p.y - 20, d.txt, d.c); burst(p.x, p.y, d.c, 25);
+  beep(500, 0.12, 'triangle', 0.15, 2); setTimeout(() => beep(900, 0.2, 'triangle', 0.15, 1.5), 90);
+  if (p.k === 'heart') { if (player.hp < MAX_HP) player.hp++; else score += 50; }
+  else if (p.k === 'weapon') { if (weapon < 3) weapon++; else score += 100; }
+  else if (p.k === 'rapid') rapidT = 8;
+  else if (p.k === 'shield') shieldT = 7;
+  else if (p.k === 'nuke') {
+    for (const e of enemies) { burst(e.x, e.y, e.color, 20); score += 10; }
+    enemies = []; shake = 25; beep(80, 0.8, 'sawtooth', 0.25, 0.2);
+  }
+}
+
+function update(dt) {
+  if (over) return;
+  const sp = 260;
+  let dx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0), dy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+  if (dx && dy) { dx *= Math.SQRT1_2; dy *= Math.SQRT1_2; }
+  const k = Math.min(1, 14 * dt); // acceleration smoothing
+  player.vx += (dx * sp - player.vx) * k; player.vy += (dy * sp - player.vy) * k;
+  player.x = Math.max(player.r, Math.min(cv.width - player.r, player.x + player.vx * dt));
+  player.y = Math.max(player.r, Math.min(cv.height - player.r, player.y + player.vy * dt));
+  if (dx || dy) particles.push({ x: player.x, y: player.y, vx: 0, vy: 0, life: 0.3, max: 0.3, color: '#00aaff' });
+  shake *= 0.9; hue = (hue + 200 * dt) % 360;
+  player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  rapidT -= dt; shieldT -= dt; hitT -= dt;
+
+  shootT -= dt;
+  if (mouse.down && shootT <= 0) {
+    shootT = rapidT > 0 ? 0.06 : 0.12;
+    beep(700 + weapon * 80, 0.08, 'square', 0.05, 0.3); shake = Math.max(shake, 1.5 + weapon);
+    for (const o of SPREAD[weapon]) {
+      const a = player.angle + o;
+      bullets.push({ x: player.x, y: player.y, vx: Math.cos(a) * 700, vy: Math.sin(a) * 700 });
+    }
+  }
+
+  // waves: spawn the wave, wait for it to be cleared, short break, next wave
+  if (breakT > 0) {
+    breakT -= dt;
+    if (breakT <= 0) { wave++; toSpawn = 5 + wave * 4; spawnT = 0; }
+  } else if (toSpawn > 0) {
+    spawnT -= dt;
+    if (spawnT <= 0) { spawnEnemy(); toSpawn--; spawnT = Math.max(0.25, 1.1 - wave * 0.06); }
+  } else if (!enemies.length) {
+    breakT = 3.5; beep(400, 0.5, 'triangle', 0.15, 2);
+    dropPower(cv.width / 2, cv.height / 2);
+  }
+
+  for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  bullets = bullets.filter(b => b.x > -20 && b.x < cv.width + 20 && b.y > -20 && b.y < cv.height + 20);
+
+  for (const e of enemies) {
+    const a = Math.atan2(player.y - e.y, player.x - e.x);
+    e.x += Math.cos(a) * e.spd * dt; e.y += Math.sin(a) * e.spd * dt; e.flash -= dt;
+  }
+
+  for (const e of enemies) {
+    for (const b of bullets) {
+      if (b.dead || Math.hypot(e.x - b.x, e.y - b.y) >= e.r + 4) continue;
+      b.dead = true;
+      if (--e.hp > 0) { e.flash = 0.1; burst(b.x, b.y, '#ffffff', 5); beep(300, 0.05, 'square', 0.06, 0.5); break; }
+      e.dead = true; score += 10; burst(e.x, e.y, e.color, 28); shake = Math.max(shake, 4);
+      beep(220, 0.2, 'sawtooth', 0.12, 0.2); beep(900, 0.06, 'triangle', 0.06, 2);
+      if (Math.random() < (e.r > 25 ? 0.5 : 0.1)) dropPower(e.x, e.y);
+      break;
+    }
+    if (!e.dead && Math.hypot(e.x - player.x, e.y - player.y) < e.r + player.r) {
+      e.dead = true; burst(e.x, e.y, e.color, 24);
+      if (shieldT > 0) { score += 10; beep(500, 0.1, 'triangle', 0.1, 2); continue; }
+      player.hp--; hitT = 0.3; shake = 14; beep(120, 0.4, 'sawtooth', 0.2, 0.3); burst(player.x, player.y, '#00aaff', 20);
+      if (player.hp <= 0) { over = true; beep(300, 1, 'sawtooth', 0.2, 0.1); }
+    }
+  }
+  bullets = bullets.filter(b => !b.dead);
+  enemies = enemies.filter(e => !e.dead);
+
+  for (const p of powerups) {
+    p.life -= dt;
+    if (Math.hypot(p.x - player.x, p.y - player.y) < player.r + 16) { collect(p); p.life = 0; }
+  }
+  powerups = powerups.filter(p => p.life > 0);
+
+  for (const t of texts) { t.y -= 30 * dt; t.life -= dt; }
+  texts = texts.filter(t => t.life > 0);
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.97; p.vy *= 0.97; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function glow(color, blur) { ctx.shadowColor = color; ctx.shadowBlur = blur; }
+
+function draw() {
+  ctx.shadowBlur = 0; ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#07080d'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  ctx.strokeStyle = `hsla(${hue},100%,60%,0.08)`; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = 0; x < cv.width; x += 50) { ctx.moveTo(x, 0); ctx.lineTo(x, cv.height); }
+  for (let y = 0; y < cv.height; y += 50) { ctx.moveTo(0, y); ctx.lineTo(cv.width, y); }
+  ctx.stroke();
+
+  for (const p of particles) {
+    ctx.globalAlpha = p.life / p.max; glow(p.color, 10); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  // power-ups: spinning diamond with a letter
+  const now = performance.now() / 1000;
+  ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
+  for (const p of powerups) {
+    if (p.life < 3 && Math.floor(p.life * 6) % 2) continue; // blink before vanishing
+    const d = POW[p.k], s = 16 + Math.sin(now * 5) * 2;
+    glow(d.c, 25); ctx.strokeStyle = d.c; ctx.fillStyle = d.c + '40'; ctx.lineWidth = 3;
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(now * 2);
+    ctx.beginPath(); ctx.rect(-s / 1.4, -s / 1.4, s * 1.4, s * 1.4); ctx.fill(); ctx.stroke(); ctx.restore();
+    ctx.fillStyle = '#fff'; ctx.fillText(d.l, p.x, p.y + 6);
+  }
+
+  for (const b of bullets) {
+    const c = `hsl(${hue},100%,70%)`; glow(c, 18); ctx.fillStyle = c; ctx.strokeStyle = c; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx * 0.02, b.y - b.vy * 0.02); ctx.stroke();
+    ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, 7); ctx.fill();
+  }
+
+  for (const e of enemies) {
+    const c = e.flash > 0 ? '#ffffff' : e.color;
+    glow(c, 20); ctx.strokeStyle = c; ctx.fillStyle = e.color + '40'; ctx.lineWidth = e.r > 25 ? 5 : 3;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, 7); ctx.fill(); ctx.stroke();
+  }
+
+  if (!over) {
+    ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle);
+    const c = hitT > 0 ? '#ffffff' : '#00aaff';
+    glow(c, 25); ctx.strokeStyle = c; ctx.fillStyle = 'rgba(0,170,255,0.25)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.rect(-player.r, -player.r, player.r * 2, player.r * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(player.r + 10, 0); ctx.stroke(); // gun barrel
+    ctx.restore();
+    if (shieldT > 0) {
+      glow('#00ddff', 25); ctx.strokeStyle = '#00ddff'; ctx.globalAlpha = shieldT < 2 && Math.floor(shieldT * 8) % 2 ? 0.2 : 0.8;
+      ctx.beginPath(); ctx.arc(player.x, player.y, player.r + 12, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  for (const t of texts) {
+    ctx.globalAlpha = Math.min(1, t.life); glow(t.color, 12); ctx.fillStyle = t.color; ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center'; ctx.fillText(t.s, t.x, t.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.shadowBlur = 0; ctx.font = '20px monospace'; ctx.textAlign = 'left';
+  glow('#00aaff', 10); ctx.fillStyle = '#9fdcff'; ctx.fillText('SCORE ' + score, 20, 36);
+  for (let i = 0; i < MAX_HP; i++) {
+    glow('#ff1144', 12); ctx.fillStyle = i < player.hp ? '#ff3355' : 'rgba(255,51,85,0.15)';
+    ctx.beginPath(); ctx.arc(30 + i * 28, 60, 8, 0, 7); ctx.fill();
+  }
+  glow('#ffee00', 10); ctx.fillStyle = '#ffee00'; ctx.fillText('WEAPON LV ' + (weapon + 1) + (weapon === 3 ? ' MAX' : ''), 20, 92);
+  let by = 118;
+  if (rapidT > 0) { glow('#33ff99', 10); ctx.fillStyle = '#33ff99'; ctx.fillText('RAPID ' + rapidT.toFixed(1) + 's', 20, by); by += 26; }
+  if (shieldT > 0) { glow('#00ddff', 10); ctx.fillStyle = '#00ddff'; ctx.fillText('SHIELD ' + shieldT.toFixed(1) + 's', 20, by); }
+  ctx.textAlign = 'right'; glow('#ff3355', 15); ctx.fillStyle = '#ff6680'; ctx.font = 'bold 28px monospace';
+  ctx.fillText('ROUND ' + Math.max(wave, 1), cv.width - 20, 40);
+  ctx.font = '16px monospace'; ctx.fillText('ZOMBIES ' + (enemies.length + toSpawn), cv.width - 20, 66);
+
+  // round banner between waves
+  if (breakT > 0 && !over) {
+    ctx.textAlign = 'center'; ctx.globalAlpha = Math.min(1, breakT);
+    glow('#ffee00', 30); ctx.fillStyle = '#ffee00'; ctx.font = 'bold 64px monospace';
+    ctx.fillText('ROUND ' + (wave + 1), cv.width / 2, cv.height / 3);
+    if (wave > 0) { ctx.font = '22px monospace'; ctx.fillText('ROUND CLEARED - grab the power-up!', cv.width / 2, cv.height / 3 + 40); }
+    ctx.globalAlpha = 1;
+  }
+
+  if (over) {
+    ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.textAlign = 'center'; const cx = cv.width / 2, cy = cv.height / 2;
+    glow('#ff1144', 30); ctx.fillStyle = '#ff3355'; ctx.font = 'bold 72px monospace'; ctx.fillText('GAME OVER', cx, cy - 40);
+    glow('#00aaff', 15); ctx.fillStyle = '#9fdcff'; ctx.font = '28px monospace'; ctx.fillText('You survived to Round ' + wave + '  |  Score: ' + score, cx, cy + 10);
+    ctx.strokeStyle = '#ffee55'; ctx.lineWidth = 2; glow('#ffee55', 15);
+    ctx.strokeRect(cx - 120, cy + 40, 240, 50);
+    ctx.fillStyle = '#ffee55'; ctx.font = '22px monospace'; ctx.fillText('Click to Restart', cx, cy + 72);
+  }
+}
+
+function loop(t) {
+  const dt = Math.min((t - (last || t)) / 1000, 0.05); last = t;
+  update(dt); draw(); requestAnimationFrame(loop);
+}
+reset(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
